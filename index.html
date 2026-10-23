@@ -303,7 +303,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
       <label>หยุดเมื่อ
         <select id="pauseMode" aria-label="หยุดอัตโนมัติ">
           <option value="inv">ขบวนสำคัญต้องรอ</option>
-          <option value="all">ต้องตัดสินใจทุกครั้ง</option>
+          <option value="all">ต้องหลีกทุกครั้ง</option>
           <option value="off">ไม่หยุดเอง</option>
         </select>
       </label>
@@ -685,7 +685,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
   }
 
   function prepare(data, opts) {
-    if (data.meta && data.meta.dayStart) setDay(data.meta.dayStart);
+    if (api.forceDay) setDay(api.forceDay); else if (data.meta && data.meta.dayStart) setDay(data.meta.dayStart);
     var stations = data.stations.map(function (s, i) { var o = {}; for (var k in s) o[k] = s[k]; o.idx = i; return o; });
     var n = stations.length;
     stations.forEach(function (s, i) { if (s.bnd === undefined) s.bnd = (i === 0 || i === n - 1); });
@@ -807,6 +807,42 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
     }
   }
 
+  /* ---- real cross-district trains: the neighbour district hands a train over when it arrives at the shared station ---- */
+  Sim.prototype.dnLive = function (tr) {
+    var st = this.plan.stations[tr.p.exit], a = this.dnm && st ? this.dnm[tr.no + '@' + st.id] : null, lv = this.live || {};
+    if (!a) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== this.me && lv[a[i]]) return true;
+    return false;
+  };
+  Sim.prototype.holds = function (tr) {
+    if (tr.handed || !this.upm) return false;
+    var a = this.upm[tr.no + '@' + this.plan.stations[tr.p.entry].id], lv = this.live || {}, on = false, i;
+    if (!a) return false;
+    for (i = 0; i < a.length; i++) if (a[i] !== this.me && lv[a[i]]) on = true;
+    return on && this.t < tr.appearT + 120;
+  };
+  Sim.prototype.handoff = function (no, stId, t, d) {
+    for (var i = 0; i < this.trains.length; i++) {
+      var tr = this.trains[i];
+      if (tr.status !== 'pending' || tr.handed || String(tr.no) !== String(no) || this.plan.stations[tr.p.entry].id !== stId) continue;
+      tr.handed = true; tr.warned = true; d = Math.max(0, d || 0);
+      if (tr.p.origin) tr.d0 = d;
+      tr.appearT = this.t;
+      this.ev('info', 'ขบวน ' + tr.no + ' มาถึง' + this.plan.stations[tr.p.entry].th + ' จากแขวงข้างเคียง' + (d >= 1 ? ' ล่าช้า ' + Math.round(d) + ' นาที' : ' ตรงเวลา'), tr);
+      return true;
+    }
+    return false;
+  };
+  Sim.prototype.handDep = function (no, stId) {
+    var hit = false;
+    for (var i = 0; i < this.trains.length; i++) {
+      var tr = this.trains[i];
+      if (tr.status !== 'done' && String(tr.no) === String(no) && this.plan.stations[tr.p.exit].id === stId) { tr.dnDone = true; hit = true; }
+    }
+    return hit;
+  };
+  Sim.prototype.setLive = function (keys) { this.live = {}; for (var i = 0; i < keys.length; i++) this.live[keys[i]] = true; return true; };
+
   Sim.prototype.km = function (i) { return this.plan.stations[i].km; };
   Sim.prototype.isBoundary = function (i) { return !!this.plan.stations[i].bnd; };
 
@@ -842,6 +878,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
   };
 
   Sim.prototype.finish = function (tr, t) {
+    if (tr.dnWait) t = Math.max(tr.arrAct[tr.at] || t, tr.readyAt || 0);   // time spent waiting for the next district is not this district's delay
     tr.status = 'done';
     tr.exitT = t;
     tr.exitDelay = t - tr.p.schedExit;
@@ -864,7 +901,9 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
     var st = this.plan.stations[j];
     tr.standStart = t;
     if (j === p.exit) {
-      if (p.terminus) { this.finish(tr, t); return; }
+      if (st.bnd && this.onHand) this.onHand({ no: tr.no, st: st.id, t: t, d: Math.max(0, t - p.arr[j]) });
+      tr.dnWait = !!(st.bnd && this.dnLive(tr));
+      if (p.terminus && !tr.dnWait) { this.finish(tr, t); return; }
       tr.status = 'dwell'; tr.readyAt = this.readyTime(tr, j, t);
       return;
     }
@@ -896,7 +935,11 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
     var lim = tr.readyAt;
     if (p.xing[i] && (tr.early || (this.mode === 'manual' && tr.cleared))) lim = Math.min(lim, tr.standStart);
     if (t < lim - 1e-9) return false;
-    if (i === p.exit) { this.finish(tr, t); return true; }
+    if (i === p.exit) {
+      if (tr.dnWait && !tr.dnDone && this.dnLive(tr) && t < tr.readyAt + 90) { tr.awaiting = 'down'; return false; }
+      if (tr.awaiting === 'down') tr.awaiting = null;
+      this.finish(tr, t); return true;
+    }
     var plan = this.plan, st = plan.stations[i], dir = p.dir;
     if (st.loop) {
       tr.awaiting = null;
@@ -932,6 +975,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
 
     var j = p.next[i];
     tr.depAct[i] = t;
+    if (st.bnd && i === p.entry && this.onDep) this.onDep({ no: tr.no, st: st.id, t: t });
     tr.trace.push({ t: t, km: this.km(i), i: i });
     var sched = (p.arr[j] - p.dep[i]) * p.pad;
     var late = Math.max(0, t - p.dep[i]);
@@ -990,7 +1034,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
             ? 'ขบวน ' + tr.no + ' จะออกจาก' + en + 'ล่าช้า ~' + Math.round(tr.d0) + ' นาที'
             : 'ขบวน ' + tr.no + ' จะเข้าเขตที่' + en + 'ล่าช้า ~' + Math.round(tr.d0) + ' นาที (คาดเข้า ' + fmt(tr.appearT) + ')', tr);
         }
-        if (t >= tr.appearT - 1e-9) this.spawn(tr);
+        if (t >= tr.appearT - 1e-9 && !this.holds(tr)) this.spawn(tr);
       }
     }
     for (i = 0; i < this.trains.length; i++) {
@@ -1112,7 +1156,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
   Sim.prototype.whyWait = function (tr) {
     if (tr.held) return ' (ถูกสั่งจอดรอ)';
     if (tr.awaiting === 'clear') return ' (ยังไม่ได้รับคำสั่งปล่อย)';
-    if (tr.awaiting === 'meet') return ' (รอตัดสินจุดสวน)';
+    if (tr.awaiting === 'meet') return ' (รอหลีกจุดสวน)';
     return ' (รอทางว่าง)';
   };
 
@@ -1496,7 +1540,7 @@ var SPEEDS = [0.05, 0.5, 1, 2, 5, 10, 60];
 var MODE_ORDER = ['auto', 'meets', 'manual'];
 var MODE_INFO = {
   auto: { th: 'ช่วยอัตโนมัติ', d: 'ระบบปล่อยขบวนเอง คุณแทรกแซงเมื่ออยากสั่ง ชนะระบบได้ยาก' },
-  meets: { th: 'ตัดสินจุดสวน', d: 'ขบวนที่จะสวนกันหยุดรอจนกว่าคุณโทรสั่งหลีกว่าใครไปก่อน (แนะนำ)' },
+  meets: { th: 'หลีกจุดสวน', d: 'ขบวนที่จะสวนกันหยุดรอจนกว่าคุณโทรสั่งหลีกว่าใครไปก่อน (แนะนำ)' },
   manual: { th: 'ควบคุมเอง', d: 'ทุกขบวนต้องรอคำสั่ง “ปล่อย” ก่อนออกจากสถานีหลีก ครั้งแล้วครั้งเล่าตลอดวัน' }
 };
 
@@ -1513,6 +1557,15 @@ var S = {
 };
 if (!LEVELS[S.level]) S.level = 'normal';
 window.CTC_GAME = S;
+S.day = store.get('day', '04:00'); if (!/^\d\d:\d\d$/.test(S.day)) S.day = '04:00';
+var UPM = {}, DNM = {};   // train@station -> districts where that train leaves / enters the district at that station
+Object.keys(ALL).forEach(function (k) {
+  var d = ALL[k], ss = d.stations, n = ss.length;
+  d.trains.forEach(function (t) {
+    var en = t.entryId || (t.dir > 0 ? ss[0].id : ss[n - 1].id), ex = t.exitId || (t.dir > 0 ? ss[n - 1].id : ss[0].id);
+    (DNM[t.no + '@' + en] = DNM[t.no + '@' + en] || []).push(k); (UPM[t.no + '@' + ex] = UPM[t.no + '@' + ex] || []).push(k);
+  });
+});
 
 /* ---------- theme ---------- */
 var C = {};
@@ -1577,21 +1630,22 @@ function syncShadow() {
 }
 function newGame(level, seed, mode) {
   S.level = level; S.seed = seed; S.mode = mode || S.mode;
-  plan = CTC.prepare(DATA, { optional: S.freight });
+  CTC.forceDay = S.day || '04:00'; plan = CTC.prepare(DATA, { optional: S.freight });
   DAY_START = CTC.DAY_START; DAY_END = CTC.DAY_END;
   updateSub();
   S.sim = new Sim(plan, { level: level, seed: seed, mode: S.mode, freightFree: S.freightFree });
   S.shadow = new Sim(plan, { level: level, seed: seed, freightFree: S.freightFree }); COOP.wrap(S.sim);
+  S.sim.upm = UPM; S.sim.dnm = DNM; S.sim.me = DIST; S.sim.live = {}; S.sim.onHand = HANDF; S.sim.onDep = HDEPF;
   S.playing = false; S.sel = null; S.carry = 0; S.evPtr = 0; S.seen = {}; S.orders = 0; S.confs = []; S.shown = false;
   $('log').textContent = '';
   resetRows();
   hideAlert();
-  if (S.skip) { S.sim.skipIdle(3); syncShadow(); }
+  if (S.skip && !(OL && OL.room)) { S.sim.skipIdle(3); syncShadow(); }
   pollEvents();
   computeConfs();
   refresh(true);
   updatePlayBtn();
-  store.set('level', level); store.set('mode', S.mode); COOP.onNew();
+  store.set('level', level); store.set('mode', S.mode); store.set('day', S.day); COOP.onNew(); glLive(true);
 }
 function setPlaying(v) {
   if (S.sim.finished) v = false;
@@ -1614,7 +1668,7 @@ function advance(minutes) {
   n = COOP.gate(sim, n);
   for (var k = 0; k < n && !sim.finished; k++) {
     COOP.pre(sim);
-    if (S.skip && !COOP.on && sim.skipIdle(3)) skipped = true;
+    if (S.skip && !(OL && OL.room) && sim.skipIdle(3)) skipped = true;
     sim.step();
   }
   if (!sim.finished && sim.t > DAY_END + 240) sim.finished = true;   // a train left standing at a red signal all night must not stall the game forever
@@ -1718,7 +1772,7 @@ function renderConfs() {
     if (o.ordered) {
       var fw = o.ordered === 'S' ? o.south : o.north, lw = o.ordered === 'S' ? o.north : o.south;
       r.f.btns.hidden = true; r.f.note.hidden = true; r.f.doneNote.hidden = false;
-      setHTML(r.f.doneNote, 'สั่งแล้ว: <b>' + esc(lw.no) + '</b> รอที่' + esc(ST[o.ordered === 'S' ? o.block.to : o.block.from].th) + ' ให้ <b>' + esc(fw.no) + '</b> ไปก่อน ' +
+      setHTML(r.f.doneNote, 'สั่งแล้ว: <b>' + esc(lw.no) + '</b> หลีก รอตามหลังที่' + esc(ST[o.ordered === 'S' ? o.block.to : o.block.from].th) + ' ให้ <b>' + esc(fw.no) + '</b> ไปก่อน ' +
         '<button class="btn sm" type="button" data-act="C">ยกเลิกคำสั่ง</button>');
     } else {
       r.f.btns.hidden = false; r.f.note.hidden = false; r.f.doneNote.hidden = true;
@@ -1727,8 +1781,8 @@ function renderConfs() {
         (o.inv ? ' · <b style="color:var(--bad)">' + esc(dl.p.th) + ' สำคัญกว่าแต่ต้องรอ</b>' : ''));
       var recS = o.costN <= o.costS;
       var bS = r.f.btns.children[0], bN = r.f.btns.children[1];
-      setHTML(bS, esc(o.south.no) + ' ไปก่อน<small>' + esc(o.north.no) + ' รอ ~' + Math.round(o.waitN) + ' น. (× ' + o.north.p.w + ')</small>');
-      setHTML(bN, esc(o.north.no) + ' ไปก่อน<small>' + esc(o.south.no) + ' รอ ~' + Math.round(o.waitS) + ' น. (× ' + o.south.p.w + ')</small>');
+      setHTML(bS, esc(o.south.no) + ' ไปก่อน<small>' + esc(o.north.no) + ' รอตามหลัง ~' + Math.round(o.waitN) + ' น. (× ' + o.north.p.w + ')</small>');
+      setHTML(bN, esc(o.north.no) + ' ไปก่อน<small>' + esc(o.south.no) + ' รอตามหลัง ~' + Math.round(o.waitS) + ' น. (× ' + o.south.p.w + ')</small>');
       bS.classList.toggle('rec', recS); bN.classList.toggle('rec', !recS);
       bS.title = recS ? 'ค่าความล่าช้าถ่วงน้ำหนักที่คาดว่าต่ำกว่า' : ''; bN.title = !recS ? 'ค่าความล่าช้าถ่วงน้ำหนักที่คาดว่าต่ำกว่า' : '';
     }
@@ -1737,7 +1791,7 @@ function renderConfs() {
   $('cfEmpty').hidden = list.length > 0;
   var hint = $('cfHint');
   hint.hidden = S.mode !== 'meets';
-  if (S.mode === 'meets') setText(hint, 'โหมดตัดสินจุดสวน: ขบวนที่จะสวนกันจะหยุดรอจนกว่าคุณเลือก เวลาที่คาดไว้ยังเปลี่ยนได้ ตัดสินตอนขบวนมาถึงจะแม่นกว่าตัดสินล่วงหน้า');
+  if (S.mode === 'meets') setText(hint, 'โหมดหลีกจุดสวน: ขบวนที่จะสวนกันจะหยุดรอจนกว่าคุณเลือก เวลาที่คาดไว้ยังเปลี่ยนได้ สั่งหลีกตอนขบวนมาถึงจะแม่นกว่าสั่งล่วงหน้า');
   setText($('cfCount'), list.length ? list.length + ' จุด' : '');
 }
 function cancelOrder(o) {
@@ -1867,10 +1921,10 @@ function statusText(tr) {
     return 'วิ่ง ' + ST[tr.from].th + '→' + ST[tr.to].th + ' · ถึง ' + fmt(sim.t + rem);
   }
   var nm = ST[tr.at].th;
-  if (tr.at === p.exit) return 'ถึง' + nm;
+  if (tr.at === p.exit) return tr.awaiting === 'down' ? 'จอดรอส่งต่อแขวงข้างเคียงที่' + nm : 'ถึง' + nm;
   if (tr.held) return 'จอดรอ (สั่งเอง) ที่' + nm;
   if (tr.awaiting === 'clear') return 'รอคำสั่งปล่อยที่' + nm;
-  if (tr.awaiting === 'meet') return 'รอตัดสินจุดสวนที่' + nm;
+  if (tr.awaiting === 'meet') return 'รอหลีกจุดสวนที่' + nm;
   var w = tr.waits.filter(function (x) { return x.node === tr.at; })[0];
   if (w) return 'รอขบวน ' + sim.trains[w.other].no + ' ที่' + nm;
   if (sim.t < tr.readyAt - 1e-9) return (p.xing[tr.at] ? 'จอดรอหลีกที่' + nm + ' · ตารางออก ' + fmt(tr.readyAt) + (tr.early ? ' (ปล่อยก่อนแล้ว)' : ' · ปล่อยก่อนได้') : 'จอดรับส่งผู้โดยสารที่' + nm + ' · ออก ' + fmt(tr.readyAt) + ' ตามเวลา');
@@ -2015,7 +2069,7 @@ function pauseNow(html, idx) {
   refresh(true);
 }
 function checkAutoPause() {
-  if (S.pauseMode === 'off') return;
+  if (S.pauseMode === 'off' || (OL && OL.room)) return;   // online: the clock belongs to the room head, nobody pauses it
   var sim = S.sim, i, o, tr;
   // a train still waiting for an answer reminds the player again after 10 game minutes
   var recently = function (k) { return S.seen[k] !== undefined && sim.t - S.seen[k] < 10; };
@@ -2025,7 +2079,7 @@ function checkAutoPause() {
       if (tr.awaiting !== 'meet' || recently('m' + tr.idx + ':' + tr.at)) continue;
       S.seen['m' + tr.idx + ':' + tr.at] = sim.t;
       var oc = S.confs.filter(function (c) { return !c.ordered && (c.south === tr || c.north === tr); })[0];
-      pauseNow('<b>ต้องตัดสิน</b> · ' + esc(tr.p.th) + ' หยุดรอที่' + esc(ST[tr.at].th) +
+      pauseNow('<b>ต้องหลีก</b> · ' + esc(tr.p.th) + ' หยุดรอที่' + esc(ST[tr.at].th) +
         (oc ? ' เพราะจะสวนกับ ' + esc((oc.south === tr ? oc.north : oc.south).p.th) + ' ช่วง' + esc(blockName(oc.block.id)) : '') +
         ' · เลือกว่าใครไปก่อนทางโทรศัพท์ แล้วกดเล่นต่อ', tr.idx);
       return;
@@ -2089,7 +2143,7 @@ function openIntro() {
   var wasPlaying = S.playing; S.wasPlaying = wasPlaying; setPlaying(false);
   document.querySelectorAll('#levels input').forEach(function (i) { i.checked = i.value === S.level; });
   document.querySelectorAll('#modes input').forEach(function (i) { i.checked = i.value === S.mode; });
-  $('seedIn').value = S.seed;
+  $('seedIn').value = S.seed; $('dayIn').value = S.day;
   $('fgIn').checked = S.freight;
   $('ffIn').checked = S.freightFree;
   $('closeIntro').hidden = !S.shown;
@@ -2131,6 +2185,7 @@ document.addEventListener('keydown', function (e) {
   var tg = e.target && e.target.tagName;
   if (tg === 'INPUT' || tg === 'SELECT' || tg === 'TEXTAREA' || tg === 'BUTTON') return;
   if ($('intro').open || $('result').open) return;
+  if (OL.room && !GL.head && (e.code === 'Space' || e.key === '+' || e.key === '=' || e.key === '-')) return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!S.playing); }
   else if (e.key === 'h' || e.key === 'H') { if (S.sel != null) { S.sim.toggleHold(S.sel); pollEvents(); computeConfs(); refresh(true); } }
   else if (e.key === 'e' || e.key === 'E') { if (S.sel != null) { S.sim.releaseEarly(S.sel); pollEvents(); computeConfs(); refresh(true); } }
@@ -2585,7 +2640,7 @@ function drawStrip() {
         c.fill();
         var d = sim.currentDelay(tr), txt = d >= 0.5 ? '+' + Math.round(d) : '';
         var waiting = tr.status === 'dwell' && sim.t >= tr.readyAt + 0.2 && tr.at !== tr.p.exit && ST[tr.at].loop;
-        if (tr.held) txt += ' ⏸'; else if (tr.awaiting === 'clear') txt += ' รอปล่อย'; else if (tr.awaiting === 'meet') txt += ' รอตัดสิน'; else if (waiting) txt += ' รอ';
+        if (tr.held) txt += ' ⏸'; else if (tr.awaiting === 'clear') txt += ' รอปล่อย'; else if (tr.awaiting === 'meet') txt += ' รอหลีก'; else if (waiting) txt += ' รอ';
         if (tr.incident) txt = '⚠ ขัดข้อง';
         if (txt) {
           c.font = '600 10.5px ' + MONO; c.fillStyle = tr.incident || d >= 15 ? C.bad : (d >= 5 || waiting || tr.held || tr.awaiting ? C.warn : C.ink2);
@@ -3194,13 +3249,13 @@ async function olGo(mode, auto) {
     if ((mode === 'mk' && o) || (mode === 'jn' && !o)) { r.leave(); olSay(mode === 'mk' ? 'ชื่อห้องนี้มีคนใช้แล้ว ลองชื่ออื่น (หรือกดเข้าห้อง)' : 'ไม่พบห้องนี้ หรือรหัสผ่านไม่ถูก'); return; }
   }
   OL.room = r; OL.n = n; try { sessionStorage.setItem('ctc.ol', JSON.stringify({ n: n, p: p })); } catch (e) { }
-  r.onPeers(function () { olUI(); coopUpd(); }); olUI(); coopUpd();
+  r.onPeers(function () { olUI(); coopUpd(); glUpd(); }); olUI(); coopUpd(); glUpd();
   coopBind(r); r.on('dcall', dIncoming); r.on('dans', dAns); r.on('dsay', dSay); r.on('dend', dEnd);
   setTimeout(function () { if (olCount(DIST) >= 2) { r.presence({ d: null }); toast('แขวงนี้เต็มแล้ว (2/2) เลือกแขวงอื่น'); openIntro(); } }, 2500);
 }
 $('olMk').addEventListener('click', function () { olGo('mk'); });
 $('olJn').addEventListener('click', function () { olGo('jn'); });
-$('olOut').addEventListener('click', function () { try { sessionStorage.removeItem('ctc.ol'); } catch (e) { } OL.room.leave(); OL.room = null; COOP.on = false; COOP.lead = true; olUI(); olSay('ออกจากห้องแล้ว'); });
+$('olOut').addEventListener('click', function () { try { sessionStorage.removeItem('ctc.ol'); } catch (e) { } OL.room.leave(); OL.room = null; COOP.on = false; COOP.lead = true; GL.head = true; GL.sync = true; vcStop(); olUI(); olSay('ออกจากห้องแล้ว'); });
 $('distSel').addEventListener('change', function (e) {
   if (OL.room && this.value !== DIST && olCount(this.value) >= 2) { e.stopImmediatePropagation(); this.value = DIST; olSay('แขวงนั้นเต็ม (2/2) เลือกแขวงอื่นครับ'); }
 }, true);
@@ -3213,19 +3268,103 @@ function dIncoming(m) {
   el.innerHTML = '📞 <b>' + esc(dTitle(d.from)) + '</b> โทรมา ' + DNUM[d.from] + '<div class="phr"><button class="btn pri" type="button">รับสาย</button></div>';
   el.querySelector('button').addEventListener('click', function () {
     stop(); el.remove(); phDot(false); sndPick(); OL.call = { id: d.id, peer: m.peer, k: d.from }; OL.log = [];
-    OL.room.emit('dans', { id: d.id, to: m.peer }); dTalk();
+    OL.room.emit('dans', { id: d.id, to: m.peer }); dTalk(); vcStart(m.peer, false);
   });
   el._stop = stop; $('calls').appendChild(el); phDot(true); setTimeout(function () { stop(); el.remove(); }, 30000);
 }
 function dAns(m) {
   var d = m.data || {}, el = document.getElementById('dc' + d.id);
   if (el && d.to !== myPeer()) { if (el._stop) el._stop(); el.remove(); return; }
-  if (OL.call && OL.call.id === d.id && d.to === myPeer() && !OL.call.peer) { dClear(); OL.call.peer = m.peer; OL.log = []; sndPick(); dTalk(); }
+  if (OL.call && OL.call.id === d.id && d.to === myPeer() && !OL.call.peer) { dClear(); OL.call.peer = m.peer; OL.log = []; sndPick(); dTalk(); vcStart(m.peer, true); }
+}
+
+/* ---------- voice over the phone call (WebRTC, signalling through the room) ---------- */
+var VC = { pc: null, ms: null, au: null, mute: false, q: [], ready: null, peer: null };
+function vcStop() {
+  try { if (VC.pc) VC.pc.close(); } catch (e) { }
+  try { if (VC.ms) VC.ms.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { }
+  if (VC.au) VC.au.srcObject = null;
+  VC.pc = VC.ms = null; VC.q = []; VC.ready = null; VC.mute = false; VC.peer = null;
+}
+function vcStart(peer, caller) {
+  vcStop(); VC.peer = peer;
+  VC.ready = (async function () {
+    var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] });
+    VC.pc = pc;
+    try { VC.ms = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); VC.ms.getTracks().forEach(function (t) { pc.addTrack(t, VC.ms); }); }
+    catch (e) { pc.addTransceiver('audio', { direction: 'recvonly' }); toast('เปิดไมค์ไม่ได้ (ต้องอนุญาตไมค์และเปิดผ่าน https) ยังฟังอีกฝ่ายได้'); }
+    pc.ontrack = function (e) { if (!VC.au) { VC.au = new Audio(); VC.au.autoplay = true; } VC.au.srcObject = e.streams[0]; var p = VC.au.play(); if (p && p.catch) p.catch(function () { }); };
+    pc.onicecandidate = function (e) { if (e.candidate && OL.room) OL.room.emit('vc', { to: peer, k: 'c', c: e.candidate.toJSON() }); };
+    if (caller) { var o = await pc.createOffer(); await pc.setLocalDescription(o); OL.room.emit('vc', { to: peer, k: 'o', s: pc.localDescription.toJSON() }); }
+    if (OL.call) dTalk();
+  })();
+  return VC.ready;
+}
+async function vcFlush() { var pc = VC.pc; while (VC.q.length) { try { await pc.addIceCandidate(VC.q.shift()); } catch (e) { } } }
+async function vcSig(m) {
+  var d = m.data || {}; if (m.isMe || d.to !== myPeer() || !VC.ready) return;
+  await VC.ready; var pc = VC.pc; if (!pc || m.peer !== VC.peer) return;
+  try {
+    if (d.k === 'o') { await pc.setRemoteDescription(d.s); await vcFlush(); var a = await pc.createAnswer(); await pc.setLocalDescription(a); OL.room.emit('vc', { to: m.peer, k: 'a', s: pc.localDescription.toJSON() }); }
+    else if (d.k === 'a') { await pc.setRemoteDescription(d.s); await vcFlush(); }
+    else if (d.k === 'c') { if (pc.remoteDescription) await pc.addIceCandidate(d.c); else VC.q.push(d.c); }
+  } catch (e) { }
+}
+$('phMsg').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-vm]'); if (!b || !OL.call || !OL.call.peer) return; sndKey();
+  if (VC.ms) { VC.mute = !VC.mute; VC.ms.getAudioTracks().forEach(function (t) { t.enabled = !VC.mute; }); dTalk(); }
+  else toast('ยังไม่ได้เปิดไมค์ อนุญาตไมค์ในเบราว์เซอร์แล้วโทรใหม่');
+});
+
+/* ---------- one clock for the whole room: the head (first one in) drives it; trains hand over between districts ---------- */
+var GL = { head: true, sync: true, lim: 0, busy: false, hp: null, live: null };
+function HANDF(h) { if (!OL.room || COOP.busy || GL.busy || !COOP.lead) return; OL.room.emit('hand', { from: DIST, no: h.no, st: h.st, t: h.t, d: h.d }); }
+function HDEPF(h) { if (!OL.room || COOP.busy || GL.busy || !COOP.lead) return; OL.room.emit('hdep', { from: DIST, no: h.no, st: h.st, t: h.t }); }
+function glLive(force) {
+  if (!S.sim || GL.busy || COOP.busy) return;
+  var keys = [];
+  if (OL.room) OL.room.peers().forEach(function (p) { var k = p.presence && p.presence.d; if (!p.isMe && k && k !== DIST && keys.indexOf(k) < 0) keys.push(k); });
+  keys.sort(); var sig = keys.join(',');
+  if (!force && sig === GL.live) return;
+  GL.live = sig;
+  if (COOP.on && !COOP.lead) return;
+  if (force && !keys.length) return;
+  S.sim.setLive(keys);
+}
+function glSendNew(to) {
+  if (!OL.room || !S.sim) return;
+  OL.room.emit('gnew', { to: to || null, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, dy: S.day, tick: S.sim.tick, pl: !!S.playing, sp: S.speed });
+}
+function glUpd() {
+  var me = myPeer(); if (!OL.room || !me) { GL.head = true; GL.sync = true; return; }
+  var ps = OL.room.peers().filter(function (p) { return p.presence && p.presence.j; }).sort(function (a, b) { return ((a.presence.j || 0) - (b.presence.j || 0)) || (a.peer < b.peer ? -1 : 1); });
+  var h = ps.length ? ps[0].peer : me, was = GL.head, hp = GL.hp; GL.head = h === me; GL.hp = h;
+  if (GL.head) { GL.sync = true; if (!was) toast('คุณเป็นหัวห้อง คุมเวลาและความเร็วของทุกแขวง'); }
+  else if (was || hp !== h) { GL.sync = false; setPlaying(false); OL.room.emit('gsync', {}); }
+  glLive();
+}
+function glBind(r) {
+  r.on('hand', function (m) { var d = m.data || {}; if (m.isMe || d.from === DIST || !S.sim || (COOP.on && !COOP.lead) || (DNM[d.no + '@' + d.st] || []).indexOf(DIST) < 0) return; S.sim.handoff(d.no, d.st, d.t, d.d); });
+  r.on('hdep', function (m) { var d = m.data || {}; if (m.isMe || d.from === DIST || !S.sim || (COOP.on && !COOP.lead) || (UPM[d.no + '@' + d.st] || []).indexOf(DIST) < 0) return; S.sim.handDep(d.no, d.st); });
+  r.on('ghb', function (m) { var d = m.data || {}; if (GL.head || m.isMe || !GL.sync) return; GL.lim = d.tick; S.speed = d.sp; if (!!d.pl !== S.playing) setPlaying(!!d.pl); else updatePlayBtn(); });
+  r.on('gsync', function (m) { if (GL.head && !m.isMe) glSendNew(m.peer); });
+  r.on('gnew', function (m) {
+    var d = m.data || {}; if (GL.head || m.isMe || (d.to && d.to !== myPeer())) return;
+    GL.busy = true;
+    try {
+      S.skip = false; S.freight = d.fr; S.freightFree = d.ff; S.day = d.dy || S.day; newGame(d.lv, d.seed, d.md);
+      var sim = S.sim, g = 0; while (sim.tick < d.tick && !sim.finished && g++ < 300000) sim.step();
+      GL.lim = d.tick; GL.sync = true; S.speed = d.sp; closeDlg($('intro')); S.shown = true;
+      syncShadow(); pollEvents(); computeConfs(); refresh(true); setPlaying(!!d.pl);
+    } finally { GL.busy = false; }
+    glLive(true);
+  });
+  r.on('vc', vcSig);
 }
 var DQ = ['รับทราบครับ', 'ขบวนผ่านหรือยังครับ', 'ผ่านแล้วครับ', 'ยังไม่ผ่านครับ', 'ขอบคุณครับ'];
 function dTalk() {
   if (!OL.call) return; PH.st = 'dtalk'; PH.z = null;
-  phMsg('☎ คุยกับ <b>' + esc(dTitle(OL.call.k)) + '</b><br>' + OL.log.slice(-4).map(esc).join('<br>') + '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">' +
+  phMsg('☎ คุยกับ <b>' + esc(dTitle(OL.call.k)) + '</b><br>' + OL.log.slice(-4).map(esc).join('<br>') + '<div style="margin-top:6px"><button class="btn" type="button" data-vm="1">' + (VC.ms ? (VC.mute ? '🔇 ไมค์ปิดอยู่ (กดเปิด)' : '🎤 ไมค์เปิดอยู่ (กดปิด)') : '🎤 ไมค์ไม่ได้เปิด') + '</button></div><div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">' +
     DQ.map(function (q, i) { return '<button class="btn" type="button" data-ds="' + i + '">' + q + '</button>'; }).join('') + '</div>'); phShow();
 }
 $('phMsg').addEventListener('click', function (e) {
@@ -3238,9 +3377,9 @@ function dSay(m) {
 }
 function dEnd(m) {
   var d = m.data || {}; if (!OL.call || d.id !== OL.call.id || d.to !== myPeer()) return;
-  dClear(); OL.call = null; phReset('อีกฝ่ายวางสายแล้ว');
+  dClear(); OL.call = null; vcStop(); phReset('อีกฝ่ายวางสายแล้ว');
 }
-$('phEnd').addEventListener('click', function () { if (OL.call) { if (OL.call.peer) OL.room.emit('dend', { id: OL.call.id, to: OL.call.peer }); dClear(); OL.call = null; } });
+$('phEnd').addEventListener('click', function () { if (OL.call) { if (OL.call.peer) OL.room.emit('dend', { id: OL.call.id, to: OL.call.peer }); dClear(); OL.call = null; vcStop(); } });
 $('phCall').addEventListener('click', function (e) {
   var k = dk(PH.num); if (PH.st !== 'idle' || PH.num.length !== 4 || !k) return; e.stopImmediatePropagation();
   if (!OL.room) { phMsg('ต้องเข้าห้องออนไลน์ก่อน (ช่องด้านบนสุด) จึงโทรหาแขวงอื่นได้'); return; }
@@ -3261,7 +3400,7 @@ setTimeout(function () {
 var COOP = { lead: true, on: false, synced: true, busy: false, lim: 0, q: [], log: [], lp: null };
 COOP.wrap = function (sim) {
   if (sim._o) return; sim._o = {}; sim._in = 0;
-  ['giveWay', 'cancelWay', 'toggleHold', 'releaseEarly', 'clearTrain'].forEach(function (m) {
+  ['giveWay', 'cancelWay', 'toggleHold', 'releaseEarly', 'clearTrain', 'handoff', 'handDep', 'setLive'].forEach(function (m) {
     var f = sim[m]; if (!f) return; sim._o[m] = f;
     sim[m] = function () {
       var a = Array.prototype.slice.call(arguments);
@@ -3287,18 +3426,22 @@ COOP.exec = function (m, a, by) {
 };
 COOP.pre = function (sim) { while (COOP.q.length && COOP.q[0].tick <= sim.tick) { var c = COOP.q.shift(); sim._o[c.m].apply(sim, c.a); } };
 COOP.gate = function (sim, n) {
-  if (!COOP.on || COOP.lead || COOP.busy) return n; if (!COOP.synced) return 0;
-  var al = COOP.lim - sim.tick; return al <= 0 ? 0 : Math.min(al, Math.max(n, Math.ceil(al * 0.5)));
+  if (COOP.busy || GL.busy) return n;
+  var lim = Infinity;
+  if (OL.room && !GL.head) { if (!GL.sync) return 0; lim = GL.lim; }            // everybody follows the room head's clock
+  if (COOP.on && !COOP.lead) { if (!COOP.synced) return 0; lim = Math.min(lim, COOP.lim); }
+  if (lim === Infinity) return n;
+  var al = lim - sim.tick; return al <= 0 ? 0 : Math.min(al, Math.max(n, Math.ceil(al * 0.5)));
 };
 COOP.sendInit = function () {
   if (!OL.room || !S.sim) return;
-  OL.room.emit('cinit', { dist: DIST, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, tick: S.sim.tick, pl: !!S.playing, log: COOP.log });
+  OL.room.emit('cinit', { dist: DIST, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, dy: S.day, tick: S.sim.tick, pl: !!S.playing, log: COOP.log });
 };
-COOP.onNew = function () { COOP.log = []; COOP.q = []; if (!COOP.busy && COOP.lead && COOP.on) COOP.sendInit(); };
+COOP.onNew = function () { COOP.log = []; COOP.q = []; if (OL.room && GL.head && !GL.busy && !COOP.busy) glSendNew(); if (!COOP.busy && COOP.lead && COOP.on) COOP.sendInit(); };
 COOP.load = function (d) {
   COOP.busy = true;
   try {
-    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; newGame(d.lv, d.seed, d.md);
+    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; S.day = d.dy || S.day; newGame(d.lv, d.seed, d.md);
     try { phDeparts(); } catch (e) { }
     var sim = S.sim, lg = (d.log || []).slice(), g = 0, c;
     while (sim.tick < d.tick && !sim.finished && g++ < 200000) {
@@ -3309,6 +3452,7 @@ COOP.load = function (d) {
     closeDlg($('intro')); S.shown = true; syncShadow(); pollEvents(); computeConfs(); refresh(true); setPlaying(!!d.pl);
     toast('ซิงค์เกมกับผู้เล่นอีกคนในแขวงนี้แล้ว');
   } finally { COOP.busy = false; }
+  glLive(true);
 };
 function coopUpd() {
   var me = myPeer(); if (!OL.room || !me) { COOP.on = false; COOP.lead = true; return; }
@@ -3329,15 +3473,19 @@ function coopBind(r) {
   });
   r.on('csync', function (m) { var d = m.data || {}; if (d.dist === DIST && COOP.lead && !m.isMe) COOP.sendInit(); });
   r.on('cinit', function (m) { var d = m.data || {}; if (d.dist === DIST && !COOP.lead && !m.isMe) COOP.load(d); });
+  glBind(r);
 }
 setInterval(function () {
   if (!OL.room || !S.sim) return;
+  if (GL.head) OL.room.emit('ghb', { tick: S.sim.tick, pl: !!S.playing, sp: S.speed }); else if (!GL.sync) OL.room.emit('gsync', {});
   if (COOP.lead && COOP.on) OL.room.emit('hb', { dist: DIST, tick: S.sim.tick, pl: !!S.playing, sp: S.speed });
   else if (!COOP.lead && !COOP.synced) OL.room.emit('csync', { dist: DIST });
 }, 330);
-['startBtn', 'play'].forEach(function (id) {
-  $(id).addEventListener('click', function (e) { if (COOP.on && !COOP.lead) { e.stopImmediatePropagation(); toast('ผู้เล่นที่เข้าแขวงก่อนเป็นคนคุมเวลา/เริ่มเกมใหม่'); } }, true);
+['startBtn', 'play', 'speeds', 'againSame', 'againNew'].forEach(function (id) {
+  $(id).addEventListener('click', function (e) { if (OL.room && !GL.head) { e.stopImmediatePropagation(); e.preventDefault(); toast('หัวห้อง (คนที่เข้าห้องก่อน) เป็นคนคุมเวลา ความเร็ว และเริ่มเกมใหม่'); } }, true);
 });
+$('startBtn').insertAdjacentHTML('beforebegin', '<label style="display:flex;gap:8px;align-items:center;margin:8px 0"><b>เริ่มวันที่เวลา</b><select id="dayIn"><option>00:00</option><option>04:00</option><option>06:00</option><option>12:00</option><option>18:00</option></select><small>ทุกแขวงใช้นาฬิกาเดียวกัน</small></label>');
+$('startBtn').addEventListener('click', function () { S.day = $('dayIn').value; }, true);
 /* ---------- boot ---------- */
 S.skip = $('skip').checked;
 try { document.fonts.ready.then(function () { S.dirty = true; }); } catch (e) { }
