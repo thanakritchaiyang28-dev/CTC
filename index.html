@@ -1977,7 +1977,7 @@ function renderSelected() {
   var tr = sim.trains[S.sel], p = tr.p, d = sim.currentDelay(tr);
   var h = '<div class="head">' + trainTag(tr) + '<b>' + esc(p.th) + '</b><span style="color:var(--ink2)">' + esc(p.route) + '</span>' +
     '<span class="' + delayClass(d) + '" style="font-family:var(--mono);font-weight:600">' + delayText(d) + '</span>' +
-    '<span style="color:var(--ink2)">' + esc(TYPES[p.type].th) + ' · ยาว ' + p.len + ' ม. · ' + p.vmax + ' กม./ชม. · น้ำหนัก ×' + p.w + (p.estimated ? ' · เวลาบางจุดเป็นค่าประมาณ' : '') + '</span><div style="flex-basis:100%;font-size:12px;color:var(--ink2)">' + fleetHTML(tr) + '</div></div>';
+    '<span style="color:var(--ink2)">' + esc(TYPES[p.type].th) + ' · ยาว ' + p.len + ' ม. · ' + p.vmax + ' กม./ชม. · น้ำหนัก ×' + p.w + (p.estimated ? ' · เวลาบางจุดเป็นค่าประมาณ' : '') + '</span><div style="flex-basis:100%;font-size:12px;color:var(--ink2)">' + fleetHTML(tr) + '</div><div style="flex-basis:100%;display:flex;gap:6px"><button class="btn pri" type="button" data-sheet="1">📄 ลำดับรถ</button><button class="btn" type="button" data-defect="1">🔧 อาการชำรุด</button></div></div>';
   h += '<table><thead><tr><th>สถานี</th><th class="n">ตาราง</th><th class="n">เวลาจริง</th></tr></thead><tbody>';
   p.order.forEach(function (i) {
     var pass = !p.stop[i], a = tr.arrAct[i], dp = tr.depAct[i], tp = p.est[i] ? '~' : '', sch, act = '';
@@ -2738,18 +2738,16 @@ function phSlowCall(o) {
     head = '📞 <b>สถานี' + esc(o.from) + '</b>';
   el.className = 'cl'; el.dataset.keep = '1'; el.style.borderLeftColor = 'var(--warn)';
   function body(h, btn, fn) { el.innerHTML = h + '<div class="phr"><button class="btn pri" type="button">' + btn + '</button></div>'; el.querySelector('button').addEventListener('click', fn); }
-  function s1() { body(head + ' โทรเข้า…<small>' + o.code + ' · ' + fmt(sim.t) + '</small>', '📞 รับสาย', s2); }
-  function s2() { ringStop(); phDot(false); sndPick(); body(head + ' · รับสายแล้ว<small>ตอบรับสายด้วยชื่อผัง</small>', '🗣️ ผัง' + distSay() + ' ครับ', s3); }
-  function s3() { body(head + ' แจ้งผัง: “' + esc(txt) + '”<small>' + o.code + ' · ' + fmt(sim.t) + '</small>', '🗣️ ดีครับ', s4); }
+  function s3() { body(head + ' แจ้งผัง: “' + esc(txt) + '”<small>' + o.code + ' · ' + fmt(sim.t) + '</small>', '✅ รับทราบ', s4); }
   function s4() {
     var until = sim.t + 120;
     if (sim.slows) sim.slows.push({ kmF: o.kmF, v: o.v, until: until });
-    el.remove(); sndKey();
+    el.remove(); phDot(false); sndKey();
     $('slList').insertAdjacentHTML('afterbegin', '<div>' + fmt(sim.t) + ' · ' + esc(txt) + ' <span>(' + esc(o.from) + ' · มีผลถึง ' + fmt(until) + ')</span></div>');
     $('slN').textContent = $('slList').children.length;
     toast('รับทราบ ' + txt);
   }
-  box.appendChild(el); phDot(true); ringStart(); s1();
+  box.appendChild(el); phDot(true); tone([1000], 0, 1, 0.18, 'sine'); s3();
 }
 function phSlowCallOld(o) {
   var box = $('calls'), el = document.createElement('div'),
@@ -2908,33 +2906,49 @@ $('rdBtns').addEventListener('click', function (e) {
   setTimeout(function () { sndRadio(true); rdSay(who + '“' + esc(r) + '”'); }, 700);
   pollEvents(); computeConfs(); refresh(true);
 });
+function rdNext(tr) { var n = tr.status === 'run' ? tr.to : (tr.p.next && tr.p.next[tr.at] != null && tr.p.next[tr.at] >= 0 ? tr.p.next[tr.at] : tr.at); return ST[n] ? n : tr.at; }
 function radioCall(tr, kind) {
-  var sim = S.sim, box = $('calls'), el = document.createElement('div'), txt, btns, iv;
+  var sim = S.sim, box = $('calls'), el = document.createElement('div'), h, tn = esc(tr.no);
   if (!kind) kind = (tr.status === 'dwell' && (ST[tr.at].loop || ST[tr.at].dbl)) ? 'req' : 'ok';
-  function after() { rdDone(); pollEvents(); computeConfs(); refresh(true); }
-  function rdDone() { clearInterval(iv); el.remove(); phDot(false); sndKey(); }
+  /* สถานี/พขร. คุยและยืนยันกันเอง ผังไม่ต้องกดรับทราบหรือยืนยันอะไร */
   if (kind === 'inc') {
-    txt = 'ขบวน ' + tr.no + ' แจ้งสถานีว่า ' + faultOf(tr) + ' หยุดอยู่ระหว่างสถานี' + ST[tr.from].th + '–' + ST[tr.to].th + ' คาดว่าอีกประมาณ ' + Math.ceil(tr.incident.rem) + ' นาที ครับ';
-    btns = [['รับทราบ', rdDone]];
+    h = '📻 <b>สถานี' + esc(ST[tr.to].th) + ' (วิทยุแจ้งผัง)</b>: “ขบวน ' + tn + ' แจ้งสถานีว่า ' + esc(tr._flt || faultOf(tr)) + ' หยุดอยู่ระหว่างสถานี' + esc(ST[tr.from].th) + '–' + esc(ST[tr.to].th) + ' คาดว่าอีกประมาณ ' + Math.ceil(tr.incident.rem) + ' นาที ครับ”';
+    phDot(true);
   } else if (kind === 'req') {
-    txt = 'จอดที่สถานี' + ST[tr.at].th + ' ขอทราบเวลาออกครับ';
-    btns = [['ออกได้ครับ', function () {
-      if (tr.status === 'done') { toast('ขบวน ' + tr.no + ' ออกจากเขตแล้ว'); rdDone(); return; }
-      var ok = false; if (tr.held) { sim.toggleHold(tr.idx); ok = true; } else ok = sim.releaseEarly(tr.idx);
-      toast(ok ? 'ขบวน ' + tr.no + ' ออกได้' : 'ขบวน ' + tr.no + ' ยังออกไม่ได้ ต้องออกตามตาราง'); after();
-    }], ['รอก่อนครับ', function () {
-      if (tr.status !== 'done' && !tr.held) sim.toggleHold(tr.idx);
-      toast('ขบวน ' + tr.no + ' จอดรอ'); after();
-    }]];
+    h = '📻 <b>พขร.ขบวน ' + tn + '</b>: “จอดที่สถานี' + esc(ST[tr.at].th) + ' ขอทราบเวลาออกครับ”<br><b>สถานี' + esc(ST[tr.at].th) + '</b>: “ออกตามตารางครับ”';
   } else {
-    txt = (tr.status === 'run' ? 'ผ่านสถานี' + ST[tr.from].th + ' กำลังไปสถานี' + ST[tr.to].th : 'จอดที่สถานี' + ST[tr.at].th) + ' ขอรับทราบสัญญาณทางข้างหน้าครับ';
-    btns = [['เข้าได้ครับ', rdDone]];
+    var sn = esc(ST[rdNext(tr)].th);
+    h = '📻 <b>พขร.ขบวน ' + tn + '</b>: “วอถามสถานี' + sn + ' ขอทราบสัญญาณเข้าสถานีครับ”<br><b>สถานี' + sn + '</b>: “ขบวน ' + tn + ' เข้าได้ครับ”';
   }
-  el.className = 'cl'; el.dataset.keep = '1'; el.style.borderLeftColor = 'var(--drc)';
-  el.innerHTML = '📻 <b>' + (kind === 'inc' ? 'สถานี' + esc(ST[tr.to].th) + ' (วิทยุแจ้งผัง)' : 'พนักงานขับรถขบวน ' + esc(tr.no)) + '</b>: “' + esc(txt) + '”<small>วิทยุ · ' + fmt(sim.t) + '</small><div class="phr"></div>';
-  btns.forEach(function (p) { var bt = document.createElement('button'); bt.type = 'button'; bt.className = 'btn pri'; bt.textContent = p[0]; bt.addEventListener('click', p[1]); el.lastChild.appendChild(bt); });
-  box.appendChild(el); phDot(true); sndRadio(true);
-  iv = setInterval(function () { if (!el.isConnected) { clearInterval(iv); return; } sndRadio(true); }, 6000);
+  el.className = 'cl'; el.style.borderLeftColor = 'var(--drc)';
+  el.innerHTML = h + '<small>วิทยุ · ' + fmt(sim.t) + '</small>';
+  box.appendChild(el); sndRadio(true);
+  var kids = Array.prototype.filter.call(box.children, function (c) { return !c.dataset.keep; }); while (kids.length > 3) { var k = kids.shift(); if (k._stop) k._stop(); k.remove(); }
+  setTimeout(function () { el.remove(); }, 8000);
+}
+var NC = { sim: null, h: -1, ids: {} };
+function ncPick() {
+  var ln = plan.lines.map(function (l) { return l.nodes; }), pos = {}, cand = [], ends = {}, i, tries;
+  function calls(n) { return ST[n].loop || ST[n].dbl; }
+  ln.forEach(function (nodes, li) {
+    ends[nodes[0]] = ends[nodes[nodes.length - 1]] = 1;
+    nodes.filter(calls).forEach(function (n, pi) { (pos[n] = pos[n] || []).push([li, pi]); });
+  });
+  Object.keys(pos).forEach(function (n) { var s = ST[n]; if (!s.halt && s.cls !== 1 && !s.bnd && !ends[n]) cand.push(Number(n)); });
+  function ok(a, b) { return pos[a].every(function (p) { return pos[b].every(function (q) { return p[0] !== q[0] || Math.abs(p[1] - q[1]) >= 2; }); }); }
+  for (tries = 0; tries < 3000; tries++) {
+    var c = cand.slice(), pick = [];
+    while (c.length && pick.length < 5) { var x = c.splice(Math.floor(Math.random() * c.length), 1)[0]; if (pick.every(function (y) { return ok(x, y); })) pick.push(x); }
+    if (pick.length === Math.min(5, cand.length) || tries === 2999) return pick;
+  }
+  return [];
+}
+/* ทุก 1 ชั่วโมงในเกม สุ่มสถานีใหม่ 5 แห่ง (ไม่ติดกัน) ที่ไม่โทรแจ้งขบวนออก */
+function ncUpdate(sim) {
+  var h = Math.floor(sim.t / 60);
+  if (NC.sim === sim && NC.h === h) return;
+  NC.sim = sim; NC.h = h; NC.ids = {};
+  ncPick().forEach(function (n) { NC.ids[n] = 1; });
 }
 function phDeparts() {
   var sim = S.sim;
@@ -2960,13 +2974,14 @@ function phDeparts() {
       if (PH.st === 'talk' && PH.z === Number(k)) { PH.st = 'pickA'; phMsg('สถานี' + esc(ST[k].th) + ' ต่อควบคุมแล้ว · <b>กดขบวนที่จะเข้าหลีก</b> ในผัง'); phShow(); }
     }
   });
+  ncUpdate(sim);
   sim.trains.forEach(function (tr) {
     var p = PD.m[tr.idx], run = tr.status === 'run';
     if (p && !p.run && run && p.node === tr.from) {
       var st = ST[tr.from];
-      if (st && (st.loop || st.dbl) && !(CUT[tr.from] > sim.t)) phCallIn('📞 <b>สถานี' + esc(st.th) + '</b> โทรมาแจ้ง: ขบวน <b>' + esc(tr.no) + '</b> ออกจากสถานีแล้ว ไปสถานี' + esc(ST[tr.to].th) + '<small>' + stCode(tr.from) + ' · ' + fmt(sim.t) + '</small>');
+      if (st && (st.loop || st.dbl) && !(CUT[tr.from] > sim.t) && !NC.ids[tr.from]) phCallIn('📞 <b>สถานี' + esc(st.th) + '</b> โทรมาแจ้ง: ขบวน <b>' + esc(tr.no) + '</b> ออกจากสถานีแล้ว ไปสถานี' + esc(ST[tr.to].th) + '<small>' + stCode(tr.from) + ' · ' + fmt(sim.t) + '</small>');
     }
-    if (tr.incident && !tr._rdInc) { tr._rdInc = 1; radioCall(tr, 'inc'); } else if (!tr.incident) tr._rdInc = 0;
+    if (tr.incident && !tr._rdInc) { tr._rdInc = 1; tr._flt = faultOf(tr); (tr._fh = tr._fh || []).push({ t: sim.t, txt: tr._flt }); radioCall(tr, 'inc'); } else if (!tr.incident) tr._rdInc = 0;
     PD.m[tr.idx] = { run: run, node: run ? tr.from : tr.at };
     var pn = run ? tr.from : tr.at;
     if (pn != null && PD.pass[tr.idx + ':' + pn] == null) PD.pass[tr.idx + ':' + pn] = sim.t;
@@ -3521,13 +3536,14 @@ function fleetOf(tr) {
   if (tr._fl) return tr._fl;
   var p = tr.p, r = CTC.mulberry32(fHash(String(S.seed) + ':' + tr.no)), pk = function (a) { return a[Math.floor(r() * a.length)]; };
   var fr = p.type === 'fr', dmu = p.type === 'spc' && tr.no !== '985' && tr.no !== '986', out = { loco: '', cars: '', locos: [] };
-  if (dmu) { out.loco = 'รถดีเซลราง แดวู'; out.cars = 'รถดีเซลราง แดวู ชุด ' + (3 + Math.floor(r() * 4)) + ' คัน'; tr._fl = out; return out; }
+  var num = function (lo, w) { return String(lo + Math.floor(r() * w)); };
+  if (dmu) { var kd = 3 + Math.floor(r() * 4); out.loco = 'รถดีเซลราง แดวู'; out.cars = 'รถดีเซลราง แดวู ชุด ' + kd + ' คัน'; out.list = []; for (var d = 0; d < kd; d++) out.list.push({ k: 'โดยสาร', t: 'รถดีเซลราง แดวู', n: num(1000, 9000) }); tr._fl = out; return out; }
   var nl = fr && p.len > 500 ? 2 : 1, pool = LOCOS.filter(function (g) { return fr || g[0] !== 'GE'; }), seen = {};
   while (out.locos.length < nl) { var g = pk(pool), n = g[1] + Math.floor(r() * (g[2] - g[1] + 1)), k = g[0] + n; if (seen[k]) continue; seen[k] = 1; out.locos.push(g[0] + ' ' + n); }
   out.loco = out.locos.join(' + ');
   if (fr) {
     var nw = Math.max(3, Math.round((p.len - 20) / 12)), kinds = ['ตู้สินค้า', 'ตู้คอนเทนเนอร์', 'รถบรรทุกน้ำมัน', 'รถบรรทุกปูนซีเมนต์'], k1 = pk(kinds), k2 = pk(kinds);
-    out.cars = 'รถสินค้า ' + nw + ' คัน (' + (k1 === k2 ? k1 : k1 + ' / ' + k2) + ')'; tr._fl = out; return out;
+    out.cars = 'รถสินค้า ' + nw + ' คัน (' + (k1 === k2 ? k1 : k1 + ' / ' + k2) + ')'; out.list = []; for (var w = 0; w < nw; w++) out.list.push({ k: 'สินค้า', t: w % 2 ? k2 : k1, n: num(10000, 90000) }); tr._fl = out; return out;
   }
   var n = Math.max(3, Math.round((p.len - 20) / 21)), cnt = {}, add = function (t, c) { cnt[t] = (cnt[t] || 0) + c; };
   if (tr.no === '985' || tr.no === '986') add('บพห.', n);
@@ -3536,7 +3552,10 @@ function fleetOf(tr) {
     var seats = ['บพห.', 'บสพ.', 'บชส.', 'บชท.'], a1 = pk(seats), a2 = pk(seats), left = n - sl, h = Math.ceil(left / 2);
     add(a1, h); if (left - h > 0) add(a2, left - h);
   }
-  out.cars = Object.keys(cnt).map(function (t) { return t + ' ×' + cnt[t]; }).join(' · '); tr._fl = out; return out;
+  out.cars = Object.keys(cnt).map(function (t) { return t + ' ×' + cnt[t]; }).join(' · ');
+  out.list = []; Object.keys(cnt).forEach(function (t) { for (var c = 0; c < cnt[t]; c++) out.list.push({ k: 'โดยสาร', t: t, n: num(1000, 9000) }); });
+  if ((p.type === 'sx' || p.type === 'ex') && r() < 0.7) { out.list.push({ k: 'ห่อวัตถุด่วน', t: 'รถห่อวัตถุด่วน', n: num(1000, 9000) }); out.cars += ' · ห่อวัตถุด่วน ×1'; }
+  tr._fl = out; return out;
 }
 function fleetHTML(tr) { var f = fleetOf(tr); return '🚂 <b>' + esc(f.loco) + '</b>' + (f.cars ? ' · ' + (tr.p.type === 'fr' || tr.p.type === 'spc' && f.locos.length === 0 ? '' : '🚃 ') + esc(f.cars) : ''); }
 function faultOf(tr) {
@@ -3545,6 +3564,74 @@ function faultOf(tr) {
   var C = p.type === 'fr' ? ['ตู้สินค้ามีเพลาร้อน', 'ตู้สินค้าล้อฝืด', 'ห้ามล้อรถพ่วงขัดข้อง', 'สายพ่วงรถขาด'] : ['รถโดยสารมีเพลาร้อน', 'ห้ามล้อรถพ่วงขัดข้อง', 'ประตูรถโดยสารขัดข้อง', 'ระบบไฟฟ้ารถโดยสารขัดข้อง'];
   var a = L.concat(C); return a[Math.floor(r() * a.length)];
 }
+/* ---------- ลำดับรถ (consist sheet) and fault record ---------- */
+var TH_MON = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+var NM1 = ['สมชาย', 'สมศักดิ์', 'วิชัย', 'ประเสริฐ', 'สุรชัย', 'อนุชา', 'ธนากร', 'นพดล', 'ชัยวัฒน์', 'ประยุทธ', 'สุพจน์', 'อำนาจ', 'วีระ', 'ณรงค์', 'บุญเลิศ', 'ศักดิ์ชัย'];
+var NM2 = ['ใจดี', 'แก้วมณี', 'สุขสวัสดิ์', 'ทองคำ', 'รัตนพันธ์', 'มั่นคง', 'บุญมา', 'ศรีสุข', 'วงษ์ทอง', 'พึ่งพา', 'จันทร์เพ็ญ', 'สายทอง', 'ประเสริฐศักดิ์', 'เจริญผล', 'นาคเสน', 'ดวงดี'];
+function crewOf(tr) { var r = CTC.mulberry32(fHash(String(S.seed) + ':crew:' + tr.no)), pk = function (a) { return a[Math.floor(r() * a.length)]; }; return { d: 'นาย' + pk(NM1) + ' ' + pk(NM2), a: 'นาย' + pk(NM1) + ' ' + pk(NM2) }; }
+function xEntry(k, t) { var st = ALL[k].stations; return t.entryId || (t.dir > 0 ? st[0].id : st[st.length - 1].id); }
+function nextDist(tr) {
+  var ex = plan.stations[tr.p.exit].id, hit = null;
+  if (tr.p.terminus) return DIST;
+  Object.keys(ALL).forEach(function (k) { if (k !== DIST && !hit && ALL[k].trains.some(function (t) { return String(t.no) === String(tr.no) && xEntry(k, t) === ex; })) hit = k; });
+  return hit || DIST;
+}
+function thDate(t) { var d = new Date(); d.setDate(d.getDate() + Math.floor(t / 1440)); return d.getDate() + ' ' + TH_MON[d.getMonth()] + ' พ.ศ. ' + (d.getFullYear() + 543); }
+function defectHTML(tr) {
+  var h = tr._fh || [];
+  if (!h.length) return '<div style="color:#555">ยังไม่มีรายงานอาการชำรุดของขบวนนี้</div>';
+  return '<ol style="margin:4px 0 0 18px;padding:0">' + h.map(function (f) { return '<li>' + esc(f.txt) + '<br><small>เวลา ' + fmt(f.t) + ' น. · วันที่ ' + esc(thDate(f.t)) + '</small></li>'; }).join('') + '</ol>';
+}
+function sheetHTML(tr) {
+  var p = tr.p, f = fleetOf(tr), c = crewOf(tr), rt = String(p.route || '').split('–'), og = rt[0] || '', ds = rt[rt.length - 1] || '', nd = nextDist(tr);
+  var u = function (x) { return '<u style="text-decoration:underline dotted;text-underline-offset:3px">' + esc(x) + '</u>'; };
+  var h = '<div style="text-align:center;font-weight:700;font-size:17px">ลำดับรถ</div>' +
+    '<p>สำหรับผัง ' + u(dTitle(DIST)) + ' ถึง' + u(dTitle(nd)) + '</p>' +
+    '<p>ลำดับรถของขบวน ' + u(tr.no) + ' ต้นทาง ' + u(og) + ' ปลายทาง ' + u(ds) + '</p>' +
+    '<p>ชื่อ พขร. ' + u(c.d) + '<br>ชื่อ ชค. ' + u(c.a) + '</p>' +
+    '<p>เลขรถจักร ' + u(f.locos.length ? f.locos.join(' + ') : f.loco) + '</p><ol style="margin:6px 0 0 0;padding:0;list-style:none">';
+  f.list.forEach(function (x, i) {
+    var bx = function (k) { return (x.k === k ? '☑ ' : '☐ ') + k; };
+    h += '<li style="padding:5px 0;border-top:1px solid #ccc">คันที่ ' + (i + 1) + ' เป็น ' + bx('โดยสาร') + ' ' + bx('สินค้า') + ' ' + bx('ห่อวัตถุด่วน') + '<br>จาก ' + u(og) + ' ถึง ' + u(ds) + ' · เลขรถ ' + u(x.t + ' ' + x.n) + '</li>';
+  });
+  return h + '</ol><div style="margin-top:10px;font-weight:700;border-top:2px solid #333;padding-top:6px">อาการชำรุด</div>' + defectHTML(tr);
+}
+function openSheet(tr, defOnly) {
+  var old = document.getElementById('sheetOv'); if (old) old.remove();
+  var ov = document.createElement('div'); ov.id = 'sheetOv';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:12px';
+  var pa = document.createElement('div');
+  pa.style.cssText = 'background:#fff;color:#111;border-radius:6px;max-width:560px;width:100%;max-height:90vh;overflow:auto;padding:16px 18px;font-size:14px;line-height:1.55;box-shadow:0 8px 30px rgba(0,0,0,.5)';
+  pa.innerHTML = (defOnly ? '<div style="text-align:center;font-weight:700;font-size:17px">อาการชำรุด · ขบวน ' + esc(tr.no) + '</div><div style="margin-top:6px">' + defectHTML(tr) + '</div>' : sheetHTML(tr)) +
+    '<div style="margin-top:12px;text-align:right"><button type="button" id="sheetX" style="padding:7px 18px;border:1px solid #333;border-radius:6px;background:#eee;color:#111;font:inherit">ปิด</button></div>';
+  ov.appendChild(pa); document.body.appendChild(ov);
+  ov.addEventListener('click', function (e) { if (e.target === ov || e.target.id === 'sheetX') ov.remove(); });
+}
+$('selBox').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-sheet],[data-defect]'); if (!b || S.sel == null || !S.sim) return;
+  openSheet(S.sim.trains[S.sel], b.hasAttribute('data-defect'));
+});
+/* ---------- tap a train number in the ผัง: a small menu pops up right above it ---------- */
+function hidePop() { var o = document.getElementById('trPop'); if (o) o.remove(); }
+function showPop(idx, rc) {
+  hidePop(); if (!S.sim || !S.sim.trains[idx]) return;
+  var tr = S.sim.trains[idx], el = document.createElement('div'); el.id = 'trPop';
+  el.style.cssText = 'position:fixed;z-index:9999;background:#1d2433;color:#fff;border:1px solid #6b7a99;border-radius:10px;padding:6px 8px;box-shadow:0 6px 20px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:5px;font-size:13px;visibility:hidden';
+  el.innerHTML = '<div style="text-align:center;font-weight:700">ขบวน ' + esc(tr.no) + '</div>' +
+    '<button class="btn pri" type="button" data-pk="sheet">📄 ลำดับรถ</button><button class="btn" type="button" data-pk="defect">🔧 อาการชำรุด</button>';
+  document.body.appendChild(el);
+  var w = el.offsetWidth, h = el.offsetHeight, left = Math.max(6, Math.min(window.innerWidth - w - 6, rc.left + rc.width / 2 - w / 2)), top = rc.top - h - 8;
+  if (top < 6) top = rc.bottom + 8;
+  el.style.left = left + 'px'; el.style.top = top + 'px'; el.style.visibility = 'visible';
+  el.addEventListener('click', function (e) { var b = e.target.closest('[data-pk]'); if (!b) return; hidePop(); openSheet(tr, b.dataset.pk === 'defect'); });
+}
+$('grid').addEventListener('click', function (e) {
+  var c = e.target.closest('[data-i]');
+  if (!c || PH.st !== 'idle') { hidePop(); return; }
+  var idx = Number(c.dataset.i), rc = c.getBoundingClientRect(), was = S.sel === idx;
+  setTimeout(function () { if (was) hidePop(); else showPop(idx, rc); }, 0);
+}, true);
+document.addEventListener('click', function (e) { if (!e.target.closest('#trPop') && !e.target.closest('#grid')) hidePop(); });
 /* ---------- boot ---------- */
 S.skip = $('skip').checked;
 try { document.fonts.ready.then(function () { S.dirty = true; }); } catch (e) { }
