@@ -445,6 +445,7 @@ dialog::backdrop{background:rgba(6,10,16,.6)}
     <div class="lv" id="levels"></div>
     <label class="fg"><input type="checkbox" id="fgIn" checked><span><b>รวมขบวนสินค้าเดินเมื่อต้องการ</b> <span id="fgTxt"></span></span></label>
     <label class="fg"><input type="checkbox" id="ffIn" checked><span><b>รถสินค้าโผล่เวลาสุ่ม</b> รถสินค้าทุกขบวนจะเข้าเขตเมื่อไหร่ก็ได้ในวัน ไม่ตรงช่องเวลาในตาราง (เวลาที่แสดงเป็นเวลาที่สุ่มได้ ความล่าช้านับจากเวลานั้น) ปิดไว้ถ้าอยากได้ตารางจริงตามไฟล์ รฟท.</span></label>
+    <label class="fg" style="align-items:center"><span><b>เวลาเริ่มเกม</b> (ตั้งได้ 24 ชม.)</span><input type="time" id="startT" style="margin-left:8px;font:inherit;padding:4px 6px"><span id="startTn" style="margin-left:8px;font-size:12.5px;color:var(--ink2)"></span></label>
     <div class="seed"><label for="seedIn">เมล็ดตัวเลข (seed)</label><input id="seedIn" inputmode="numeric" maxlength="9"><button class="btn sm" type="button" id="seedRnd">สุ่มใหม่</button><span>เมล็ดเดิม = ความล่าช้าชุดเดิม</span></div>
     <div class="warnbox" id="warnBox"></div>
     <div class="row">
@@ -1519,6 +1520,7 @@ var S = {
   freightFree: store.get('freightFree', true) !== false,
   sim: null, shadow: null, level: store.get('level', 'normal'), seed: 1,
   mode: MODE_ORDER.indexOf(store.get('mode', 'meets')) >= 0 ? store.get('mode', 'meets') : 'meets', clrList: [],
+  startT: (function () { var v = store.get('startT', ''); return /^\d\d:\d\d$/.test(v) ? v : ''; })(),
   speed: SPEEDS.indexOf(store.get('speed', 1)) >= 0 ? store.get('speed', 1) : 1,
   playing: false, skip: true, pauseMode: store.get('pause', 'inv'),
   win: [3, 6, 12, 'day'].indexOf(store.get('win', 6)) >= 0 ? store.get('win', 6) : 6,
@@ -1591,7 +1593,7 @@ function syncShadow() {
 }
 function newGame(level, seed, mode) {
   S.level = level; S.seed = seed; S.mode = mode || S.mode;
-  var m0 = DATA.meta; if (!m0._ds0) m0._ds0 = m0.dayStart; m0.dayStart = (typeof WORLD !== 'undefined' && WORLD.on) ? WORLD.start : m0._ds0;
+  var m0 = DATA.meta; if (!m0._ds0) m0._ds0 = m0.dayStart; var wOn = typeof WORLD !== 'undefined' && WORLD.on; if (wOn && WORLD.lead && !COOP.busy && !WORLD.busy) WORLD.start = S.startT || WORLD.start; m0.dayStart = wOn ? WORLD.start : (S.startT || m0._ds0);
   plan = CTC.prepare(DATA, { optional: S.freight });
   DAY_START = CTC.DAY_START; DAY_END = CTC.DAY_END;
   updateSub();
@@ -2109,6 +2111,10 @@ function openIntro() {
   $('seedIn').value = S.seed;
   $('fgIn').checked = S.freight;
   $('ffIn').checked = S.freightFree;
+  var onl = typeof WORLD !== 'undefined' && WORLD.on, locked = onl && !WORLD.lead;
+  $('startT').value = onl ? WORLD.start : (S.startT || DATA.meta._ds0 || DATA.meta.dayStart);
+  $('startT').disabled = locked;
+  $('startTn').textContent = locked ? '🔒 หัวห้องเป็นคนตั้ง' : (onl ? '👑 หัวห้อง: ทุกแขวงใช้เวลานี้' : '');
   $('closeIntro').hidden = !S.shown;
   openDlg($('intro'));
 }
@@ -2119,6 +2125,7 @@ $('startBtn').addEventListener('click', function () {
   var seed = parseInt($('seedIn').value, 10); if (!(seed > 0)) seed = randSeed();
   closeDlg($('intro'));
   var md = document.querySelector('#modes input:checked');
+  var stv = $('startT').value; if (/^\d\d:\d\d$/.test(stv) && !(typeof WORLD !== 'undefined' && WORLD.on && !WORLD.lead)) { S.startT = stv; store.set('startT', stv); }
   S.freight = $('fgIn').checked; store.set('freight', S.freight);
   S.freightFree = $('ffIn').checked; store.set('freightFree', S.freightFree);
   newGame(lv ? lv.value : 'normal', seed, md ? md.value : 'meets');
@@ -3377,13 +3384,13 @@ COOP.gate = function (sim, n) {
 };
 COOP.sendInit = function () {
   if (!OL.room || !S.sim) return;
-  OL.room.emit('cinit', { dist: DIST, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, tick: S.sim.tick, pl: !!S.playing, log: COOP.log });
+  OL.room.emit('cinit', { dist: DIST, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, tick: S.sim.tick, pl: !!S.playing, log: COOP.log, st: WORLD.start });
 };
 COOP.onNew = function () { COOP.log = []; COOP.q = []; if (!COOP.busy && COOP.lead && COOP.on) COOP.sendInit(); };
 COOP.load = function (d) {
   COOP.busy = true;
   try {
-    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; newGame(d.lv, d.seed, d.md);
+    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; if (WORLD.on && /^\d\d:\d\d$/.test(d.st || '')) WORLD.start = d.st; newGame(d.lv, d.seed, d.md);
     try { phDeparts(); } catch (e) { }
     var sim = S.sim, lg = (d.log || []).slice(), g = 0, c;
     while (sim.tick < d.tick && !sim.finished && g++ < 200000) {
@@ -3433,7 +3440,7 @@ var WORLD = { on: false, lead: true, lim: 0, synced: true, busy: false, start: '
 }; })();
 WORLD.sendInit = function (to) {
   if (!OL.room || !S.sim) return;
-  OL.room.emit('wi', { to: to || null, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, tick: S.sim.tick, pl: !!S.playing, sp: S.speed });
+  OL.room.emit('wi', { to: to || null, seed: S.seed, lv: S.level, md: S.mode, fr: !!S.freight, ff: !!S.freightFree, tick: S.sim.tick, pl: !!S.playing, sp: S.speed, st: WORLD.start });
 };
 WORLD.onNew = function () {
   if (!OL.room || !WORLD.on || WORLD.busy || COOP.busy) return;
@@ -3443,7 +3450,7 @@ WORLD.onNew = function () {
 WORLD.load = function (d) {
   WORLD.busy = true;
   try {
-    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; newGame(d.lv, d.seed, d.md);
+    S.skip = false; S.freight = d.fr; S.freightFree = d.ff; if (/^\d\d:\d\d$/.test(d.st || '')) WORLD.start = d.st; newGame(d.lv, d.seed, d.md);
     try { phDeparts(); } catch (e) { }
     var sim = S.sim, g = 0; while (sim.tick < d.tick && !sim.finished && g++ < 400000) sim.step();
     WORLD.lim = d.tick; WORLD.synced = true; S.speed = d.sp || S.speed;
